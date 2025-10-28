@@ -15,10 +15,7 @@
  */
 package com.alibaba.csp.sentinel.adapter.dubbo3;
 
-import com.alibaba.csp.sentinel.BaseTest;
-import com.alibaba.csp.sentinel.DubboTestUtil;
-import com.alibaba.csp.sentinel.Entry;
-import com.alibaba.csp.sentinel.EntryType;
+import com.alibaba.csp.sentinel.*;
 import com.alibaba.csp.sentinel.adapter.dubbo3.config.DubboAdapterGlobalConfig;
 import com.alibaba.csp.sentinel.context.Context;
 import com.alibaba.csp.sentinel.context.ContextUtil;
@@ -27,13 +24,16 @@ import com.alibaba.csp.sentinel.node.DefaultNode;
 import com.alibaba.csp.sentinel.node.Node;
 import com.alibaba.csp.sentinel.node.StatisticNode;
 import com.alibaba.csp.sentinel.slotchain.ResourceWrapper;
+import com.alibaba.csp.sentinel.slotchain.StringResourceWrapper;
 import com.alibaba.csp.sentinel.slots.block.RuleConstant;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRule;
 import com.alibaba.csp.sentinel.slots.block.degrade.DegradeRuleManager;
+import com.alibaba.csp.sentinel.slots.block.degrade.adaptive.AdaptiveDegradeRule;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRule;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleManager;
 import com.alibaba.csp.sentinel.util.TimeUtil;
 import org.apache.dubbo.rpc.*;
+import org.apache.dubbo.rpc.Constants;
 import org.apache.dubbo.rpc.support.RpcUtils;
 import org.junit.After;
 import org.junit.Before;
@@ -395,4 +395,85 @@ public class SentinelDubboConsumerFilterTest extends BaseTest {
         return consumerFilter.invoke(invoker, invocation);
     }
 
+    @Test
+    public void testXSentinelAdaptiveAttachmentSetWhenAdaptiveRuleEnabledSync() {
+        Invoker<?> invoker = DubboTestUtil.getDefaultMockInvoker();
+        String interfaceName = invoker.getInterface().getName();
+        String methodName = DubboTestUtil.DEFAULT_TEST_METHOD_ONE.getName();
+        Class<?>[] parameterTypes = DubboTestUtil.DEFAULT_TEST_METHOD_ONE.getParameterTypes();
+        RpcInvocation realInvocation = new RpcInvocation(
+                methodName,
+                interfaceName,
+                null,
+                parameterTypes,
+                new Object[parameterTypes.length]
+        );
+        Invocation invocation = spy(realInvocation);
+        String interfaceResource = DubboUtils.getInterfaceName(invoker);
+        AdaptiveDegradeRule adaptiveDegradeRule = new AdaptiveDegradeRule(interfaceResource);
+        adaptiveDegradeRule.setEnabled(true);
+        Result result = AsyncRpcResult.newDefaultAsyncResult("ok", invocation);
+        when(invoker.invoke(invocation)).thenReturn(result);
+        consumerFilter.invoke(invoker, invocation);
+        assertEquals("enabled", invocation.getObjectAttachment("X-Sentinel-Adaptive"));
+    }
+
+    @Test
+    public void testConsumerReceivesServerMetricsSetsServerMetricOnEntry() throws Exception {
+        Invoker invoker = DubboTestUtil.getDefaultMockInvoker();
+        Invocation invocation = DubboTestUtil.getDefaultMockInvocationOne();
+        String metrics = "cpu:60.89,tomcatQueue:200,tomcatUsage:-1";
+        Result result = AsyncRpcResult.newDefaultAsyncResult("ok", invocation);
+        result.setObjectAttachment("X-Server-Metrics", metrics);
+        when(invoker.invoke(invocation)).thenReturn(result);
+        try (MockedStatic<SphU> sphu = mockStatic(SphU.class)) {
+            Entry mockInterfaceEntry = mock(Entry.class);
+            Entry mockMethodEntry = mock(Entry.class);
+            ResourceWrapper interfaceRes = new StringResourceWrapper(DubboUtils.getInterfaceName(invoker), EntryType.OUT);
+            ResourceWrapper methodRes = new StringResourceWrapper(consumerFilter.getMethodName(invoker, invocation, null), EntryType.OUT);
+            sphu.when(() -> SphU.entry(eq(interfaceRes.getName()), anyInt(), eq(EntryType.OUT)))
+                    .thenReturn(mockInterfaceEntry);
+            sphu.when(() -> SphU.entry(eq(methodRes.getName()), anyInt(), eq(EntryType.OUT), any()))
+                    .thenReturn(mockMethodEntry);
+            consumerFilter.invoke(invoker, invocation);
+            verify(mockInterfaceEntry).setServerMetric(argThat(m ->
+                    m != null && m.getServerCpuUsage() == 60.89 && m.getServerTomcatUsageRate() == -1 && m.getServerTomcatQueueSize() == 200));
+            verify(mockMethodEntry).setServerMetric(argThat(m ->
+                    m != null && m.getServerCpuUsage() == 60.89 && m.getServerTomcatUsageRate() == -1 && m.getServerTomcatQueueSize() == 200));
+        }
+        assertNull(result.getObjectAttachment("X-Server-Metrics"));
+    }
+
+    @Test
+    public void testConsumerReceivesServerMetricsAsyncSetsServerMetricOnEntryAsync() throws Exception {
+        Invoker<?> invoker = DubboTestUtil.getDefaultMockInvoker();
+        Invocation invocation = DubboTestUtil.getDefaultMockInvocationOne();
+        String metrics = "cpu:75.50,tomcatQueue:150,tomcatUsage:80.0";
+        when(invocation.getAttachment(Constants.ASYNC_KEY)).thenReturn(Boolean.TRUE.toString());
+        AsyncRpcResult result = AsyncRpcResult.newDefaultAsyncResult("async_ok", invocation);
+        result.setObjectAttachment("X-Server-Metrics", metrics);
+        when(invoker.invoke(invocation)).thenReturn(result);
+        try (MockedStatic<SphU> sphu = mockStatic(SphU.class)) {
+            AsyncEntry mockInterfaceEntry = mock(AsyncEntry.class);
+            AsyncEntry mockMethodEntry = mock(AsyncEntry.class);
+            String interfaceResourceName = consumerFilter.getInterfaceName(invoker, null);
+            String methodResourceName = consumerFilter.getMethodName(invoker, invocation, null);
+            when(mockInterfaceEntry.getResourceWrapper()).thenReturn(new StringResourceWrapper(interfaceResourceName, EntryType.OUT));
+            when(mockMethodEntry.getResourceWrapper()).thenReturn(new StringResourceWrapper(methodResourceName, EntryType.OUT));
+            sphu.when(() -> SphU.asyncEntry(eq(interfaceResourceName), eq(ResourceTypeConstants.COMMON_RPC), eq(EntryType.OUT)))
+                    .thenReturn(mockInterfaceEntry);
+            sphu.when(() -> SphU.asyncEntry(eq(methodResourceName), eq(ResourceTypeConstants.COMMON_RPC), eq(EntryType.OUT), eq(1), any()))
+                    .thenReturn(mockMethodEntry);
+            Result filterResult = consumerFilter.invoke(invoker, invocation);
+            verify(invoker).invoke(invocation);
+            Thread.sleep(100);
+            verify(mockInterfaceEntry).setServerMetric(argThat(m ->
+                    m != null && m.getServerCpuUsage() == 75.50 && m.getServerTomcatUsageRate() == 80.0 && m.getServerTomcatQueueSize() == 150
+            ));
+            verify(mockMethodEntry).setServerMetric(argThat(m ->
+                    m != null && m.getServerCpuUsage() == 75.50 && m.getServerTomcatUsageRate() == 80.0 && m.getServerTomcatQueueSize() == 150
+            ));
+            assertNull("X-Server-Metrics attachment should be cleared by the async handler", filterResult.getObjectAttachment("X-Server-Metrics"));
+        }
+    }
 }

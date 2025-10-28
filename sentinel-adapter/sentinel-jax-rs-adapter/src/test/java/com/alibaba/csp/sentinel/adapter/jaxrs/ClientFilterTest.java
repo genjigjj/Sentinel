@@ -25,6 +25,7 @@ import com.alibaba.csp.sentinel.node.ClusterNode;
 import com.alibaba.csp.sentinel.node.EntranceNode;
 import com.alibaba.csp.sentinel.node.Node;
 import com.alibaba.csp.sentinel.slots.block.RuleConstant;
+import com.alibaba.csp.sentinel.slots.block.degrade.adaptive.AdaptiveDegradeRule;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRule;
 import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleManager;
 import com.alibaba.csp.sentinel.slots.clusterbuilder.ClusterBuilderSlot;
@@ -112,7 +113,7 @@ public class ClientFilterTest {
     @Test
     public void testClientGetHello() {
         final String url = "/test/hello";
-        String resourceName = "GET:" + url;
+        final String resourceName = "GET:" + url + "-" + System.currentTimeMillis();
         Response response = SentinelJaxRsClientTemplate.execute(resourceName, new Supplier<Response>() {
 
             @Override
@@ -143,7 +144,7 @@ public class ClientFilterTest {
     @Test
     public void testClientAsyncGetHello() throws InterruptedException, ExecutionException {
         final String url = "/test/async-hello";
-        final String resourceName = "GET:" + url;
+        final String resourceName = "GET:" + url + "-" + System.currentTimeMillis();
 
         Future<Response> future = SentinelJaxRsClientTemplate.executeAsync(resourceName, new Supplier<Future<Response>>() {
             @Override
@@ -166,7 +167,7 @@ public class ClientFilterTest {
     @Test
     public void testCustomResourceName() {
         final String url = "/test/hello/{name}";
-        final String resourceName = "GET:" + url;
+        final String resourceName = "GET:" + url + "-" + System.currentTimeMillis();
 
         Response response1 = SentinelJaxRsClientTemplate.execute(resourceName, new Supplier<Response>() {
             @Override
@@ -205,7 +206,7 @@ public class ClientFilterTest {
     @Test
     public void testClientFallback() {
         final String url = "/test/hello";
-        final String resourceName = "GET:" + url;
+        final String resourceName = "GET:" + url + System.currentTimeMillis();
         configureRulesFor(resourceName, 0);
 
         Response response = SentinelJaxRsClientTemplate.execute(resourceName, new Supplier<Response>() {
@@ -227,7 +228,7 @@ public class ClientFilterTest {
     @Test
     public void testClientCustomFallback() {
         final String url = "/test/hello";
-        final String resourceName = "GET:" + url;
+        final String resourceName = "GET:" + url + System.currentTimeMillis();
         configureRulesFor(resourceName, 0);
 
         SentinelJaxRsConfig.setJaxRsFallback(new SentinelJaxRsFallback() {
@@ -269,7 +270,7 @@ public class ClientFilterTest {
     @Test
     public void testServerReturn400() {
         final String url = "/test/400";
-        final String resourceName = "GET:" + url;
+        final String resourceName = "GET:" + url + "-" + + System.currentTimeMillis();
         Response response = SentinelJaxRsClientTemplate.execute(resourceName, new Supplier<Response>() {
             @Override
             public Response get() {
@@ -289,7 +290,7 @@ public class ClientFilterTest {
     @Test
     public void testServerReturn500() {
         final String url = "/test/ex";
-        final String resourceName = "GET:" + url;
+        final String resourceName = "GET:" + url + "-" + System.nanoTime();
         Response response = SentinelJaxRsClientTemplate.execute(resourceName, new Supplier<Response>() {
             @Override
             public Response get() {
@@ -309,7 +310,7 @@ public class ClientFilterTest {
     @Test
     public void testServerTimeout() {
         final String url = "/test/delay/10";
-        final String resourceName = "GET:/test/delay/{seconds}";
+        final String resourceName = "GET:/test/delay/{seconds}" + System.currentTimeMillis();
         try {
             SentinelJaxRsClientTemplate.execute(resourceName, new Supplier<Response>() {
                 @Override
@@ -330,7 +331,7 @@ public class ClientFilterTest {
     @Test
     public void testFutureGetServerTimeout() {
         final String url = "/test/delay/10";
-        final String resourceName = "GET:/test/delay/{seconds}";
+        final String resourceName = "GET:/test/delay/{seconds}" + System.currentTimeMillis();
         try {
             Future<Response> future = SentinelJaxRsClientTemplate.executeAsync(resourceName, new Supplier<Future<Response>>() {
                 @Override
@@ -353,7 +354,7 @@ public class ClientFilterTest {
     @Test
     public void testFutureGetTimeout() {
         final String url = "/test/delay/10";
-        final String resourceName = "GET:/test/delay/{seconds}";
+        final String resourceName = "GET:/test/delay/{seconds}" + System.currentTimeMillis();
         try {
             Future<Response> future = SentinelJaxRsClientTemplate.executeAsync(resourceName, new Supplier<Future<Response>>() {
                 @Override
@@ -376,7 +377,7 @@ public class ClientFilterTest {
     @Test
     public void testCancelFuture() {
         final String url = "/test/delay/10";
-        final String resourceName = "GET:/test/delay/{seconds}";
+        final String resourceName = "GET:/test/delay/{seconds}" + System.currentTimeMillis();
         try {
             Future<Response> future = SentinelJaxRsClientTemplate.executeAsync(resourceName, new Supplier<Future<Response>>() {
                 @Override
@@ -394,6 +395,19 @@ public class ClientFilterTest {
         ClusterNode cn = ClusterBuilderSlot.getClusterNode(resourceName);
         assertNotNull(cn);
         assertEquals(1, cn.passQps(), 0.01);
+    }
+
+    @Test
+    public void testEndToEndAdaptiveHeaderExchange() {
+        final String url = "/test/hello";
+        final String resourceName = "GET:" + url + System.currentTimeMillis();
+        AdaptiveDegradeRule adaptiveDegradeRule = new AdaptiveDegradeRule(resourceName);
+        adaptiveDegradeRule.setEnabled(true);
+        Response response = SentinelJaxRsClientTemplate.executeWithAdaptive(resourceName, client, host + url);
+        assertEquals(200, response.getStatus());
+        assertEquals(HELLO_STR, response.readEntity(String.class));
+        String serverMetrics = response.getHeaderString("X-Server-Metrics");
+        assertNull("Response should not contain X-Server-Metrics", serverMetrics);
     }
 
     private void configureRulesFor(String resource, int count) {
